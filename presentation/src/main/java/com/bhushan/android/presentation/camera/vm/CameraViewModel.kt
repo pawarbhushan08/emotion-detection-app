@@ -3,14 +3,17 @@ package com.bhushan.android.presentation.camera.vm
 import android.content.Context
 import android.util.Log
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.lifecycle.awaitInstance
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.bhushan.android.domain.usecase.DetectEmotionUseCase
 import com.bhushan.android.presentation.camera.model.CameraIntent
 import com.bhushan.android.presentation.camera.model.CameraViewState
+import com.bhushan.android.presentation.camera.model.ModelType
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,9 +21,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.concurrent.Executors
 
 
-class CameraViewModel() : ViewModel() {
+class CameraViewModel(private val detectEmotionUseCase: DetectEmotionUseCase) : ViewModel(),
+    DualEmotionListener {
     private val _state = MutableStateFlow(CameraViewState())
     val state: StateFlow<CameraViewState> = _state.asStateFlow()
 
@@ -34,6 +39,17 @@ class CameraViewModel() : ViewModel() {
     private val cameraPreviewUseCase = Preview.Builder().build().apply {
         setSurfaceProvider { newSurfaceRequest ->
             _state.update { it.copy(surfaceRequest = newSurfaceRequest) }
+        }
+    }
+
+    fun selectMlModel(modelType: ModelType) {
+        _state.update { it.copy(modelType = modelType) }
+
+        if (_state.value.isCameraBound) {
+            unbindCameraInternal()
+            if (_state.value.hasPermission && lastContext != null && lastLifecycleOwner != null) {
+                bindCameraInternal(lastContext, lastLifecycleOwner)
+            }
         }
     }
 
@@ -74,10 +90,23 @@ class CameraViewModel() : ViewModel() {
                     else -> null
                 }
                 if (cameraSelector != null) {
+                    val imageAnalysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build().apply {
+                            setAnalyzer(
+                                Executors.newSingleThreadExecutor(), DualEmotionAnalyser(
+                                    detectEmotionUseCase,
+                                    this@CameraViewModel,
+                                    viewModelScope,
+                                    _state.value.modelType
+                                )
+                            )
+                        }
                     processCameraProvider!!.bindToLifecycle(
                         lifecycleOwner ?: return@launch,
                         cameraSelector,
                         cameraPreviewUseCase,
+                        imageAnalysis
                     )
                     _state.update { it.copy(isCameraBound = true, error = null) }
                 } else {
@@ -102,5 +131,9 @@ class CameraViewModel() : ViewModel() {
         super.onCleared()
         cameraJob?.cancel()
         processCameraProvider?.unbindAll()
+    }
+
+    override fun onEmotionDetected(emotion: String) {
+        _state.update { it.copy(emotionResult = emotion) }
     }
 }
